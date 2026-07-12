@@ -88,23 +88,19 @@ No coordinates, no id bookkeeping — ideal for small models and large plans.
 |------|--------------|
 | `drawGraph` | draw a whole diagram in one call: nodes (by id) + edges (by node id), auto-laid-out |
 | `addNode` / `addEdge` | add/update one node or connect two by id (missing nodes auto-created) |
-| `describeBoard` | compact read-back of nodes (with status), edges, frames, and free-form shapes |
+| `describeBoard` | compact read-back: board name, nodes (status, shape, owner, position), edges, frames, free-form shapes |
+| `nextActionable` | the ready-set — nodes whose dependencies are all done; drives execution from the plan. `owner` filters to yours + unowned |
 | `setStatus` | mark a node none/todo/doing/done/blocked — colours it (done=green, doing=orange, blocked=red) |
-| `updateNode` | change a node's label, shape, colour, or group |
-| `removeNode` / `removeEdge` / `clearBoard` | prune or reset |
+| `assignNode` | assign a node to an agent (defaults to you) for multi-agent plans |
+| `updateNode` | change a node's label, shape, colour, group, or owner |
+| `removeNode` / `removeEdge` / `clearBoard` | prune or reset (graph only) |
+| `deleteBoard` | delete the board entirely, including its saved file |
 | `createFrame` | a titled section/swimlane to group nodes into |
 | `focusOn` | pan/zoom every viewer's browser to a node |
 | `batch` | apply many graph commands with a single layout at the end |
 
-**Low-level tools (manual coordinates — an escape hatch).**
-
-| Tool | What it does |
-|------|--------------|
-| `createShape` | rectangle / ellipse / triangle / diamond at (x,y), with optional text |
-| `connectShapes` | arrow between two flowchart steps (by "step-N" id) |
-| `addText` | free text at a position |
-| `createFlowchartStep` | numbered step box, auto-connected to the previous one |
-| `getSnapshot` | capture the raw tldraw board state |
+Plans **persist** to `server/boards/<id>.json` and reload on restart, so the board is durable memory
+an agent can resume across sessions (set `TLDRAW_PERSIST=0` to disable).
 
 **Board control.** `useBoard` switches this agent to a named board (project); `getBoardUrl`
 prints the current board's URL.
