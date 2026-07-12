@@ -1,392 +1,156 @@
-# Tldraw MCP Server
+# Tldraw MCP — a shared planning board for AI agents
 
-This project integrates [tldraw](https://tldraw.com/) with Claude AI using the Model Context Protocol (MCP). It allows Claude to create and manipulate diagrams based on natural language instructions.
+Give Claude (or any MCP client) a live [tldraw](https://tldraw.com/) canvas it can
+draw on. Ask for a flowchart, a diagram, boxes and arrows — and watch them appear in
+your browser in real time. Multiple agents can draw on the **same board at once**, and
+the board runs only when an agent is actually using it.
 
-## Getting Started
+## Features
 
-### Prerequisites
+- **Zero-config.** `npm run setup` and it works. No server to start — the canvas daemon auto-launches on first use and idles down when done.
+- **Graph tools with auto-layout.** Describe diagrams by *name and structure* (no coordinates). The server lays them out with dagre — works for plans of any size.
+- **Multi-board.** One daemon hosts many isolated boards, keyed by project directory. Agents in different projects never see each other's shapes.
+- **Status tracking.** Mark nodes `todo`/`doing`/`done`/`blocked` — the board reads as a live tracker.
+- **Agent namespacing.** Each agent's shapes get a stable colour and namespaced ids — see who drew what on shared boards.
+- **MCP-native.** Any MCP client can use it. Stdio transport, no port binding in the MCP server itself.
 
-- Node.js 18+ installed
-- Claude Desktop installed
-- Visual Studio Code (recommended)
+## Quickstart
 
-### Installation and Setup
-
-1. **Clone and install dependencies:**
-
-   ```powershell
-   cd tldraw-mcp
-   npm install
-   cd server
-   npm install
-   ```
-
-2. **Build the server code:**
-
-   ```powershell
-   cd server
-   npm run build
-   ```
-
-3. **Configure Claude Desktop:**
-
-   Create or edit the Claude Desktop configuration file at `%AppData%\Claude\claude_desktop_config.json`:
-
-   ```json
-   {
-     "mcpServers": {
-       "tldrawserver": {
-         "command": "node",
-         "args": ["D:\\tldraw-mcp\\server\\dist\\index.js"]
-       }
-     }
-   }
-   ```
-
-   Replace the path with the absolute path to the compiled server file.
-
-### Starting the Application
-
-You need to start three components in the following order:
-
-1. **Start the HTTP Server:**
-
-   ```powershell
-   # In the server directory
-   npm run start:http
-   ```
-
-2. **Start the Next.js Frontend:**
-
-   ```powershell
-   # In the root directory
-   npm run dev
-   ```
-
-3. **Start Claude Desktop and enable the MCP Server:**
-
-   - Launch Claude Desktop
-   - Open settings (gear icon)
-   - Go to the "Advanced" tab
-   - Under "MCP Servers", enable "tldrawserver"
-   - Click "Apply"
-
-### Verifying the Setup
-
-1. Open your browser to `http://localhost:3000`
-2. You should see the tldraw canvas
-3. In Claude Desktop, try a command like:
-   ```
-   Create a flowchart with two steps: "Start" and "Process Data"
-   ```
-
-### Testing the System
-
-To fully test the integration, try the following Claude commands:
-
-1. **Create a simple diagram:**
-
-   ```
-   Create a rectangle labeled "Database" at position (200, 300) with width 150 and height 100
-   ```
-
-2. **Create and connect shapes:**
-
-   ```
-   Create an ellipse labeled "User" at position (100, 100) with width 120 and height 80,
-   and a rectangle labeled "API" at position (300, 100) with width 150 and height 80.
-   Then connect the "User" shape to the "API" shape.
-   ```
-
-3. **Create a flowchart:**
-
-   ```
-   Create a flowchart with the following steps:
-   1. "Start Process"
-   2. "Collect Data"
-   3. "Analyze Results"
-   4. "Generate Report"
-   ```
-
-4. **Add standalone text:**
-
-   ```
-   Add text "CONFIDENTIAL" at position (400, 50) with font size 24
-   ```
-
-5. **Get a snapshot of the current diagram:**
-   ```
-   Take a snapshot of the current diagram
-   ```
-
-### Verifying Event Flow
-
-To verify that events are flowing correctly through the system:
-
-1. Open your browser's developer tools (F12 or Ctrl+Shift+I)
-2. Go to the Console tab
-3. Look for log messages with prefixes:
-   - `[EventBus]` - Events being broadcast internally
-   - `[HTTP Server]` - Messages from the HTTP server
-   - `[API]` - Messages from the Next.js API routes
-   - Log messages from TldrawEditor component
-
-When you issue a command in Claude, you should see a sequence of logs showing the operation moving through each part of the system.
-
-### Troubleshooting
-
-- **HTTP Server not starting:** Check if port 3002 is already in use
-- **Claude not connecting:** Verify the path in `claude_desktop_config.json`
-- **Diagram not updating:** Check browser console for errors in the event stream
-- **Types of operations not working:** Check log messages for errors in parsing or handling specific operations
-- **Snapshot functionality issues:** Check if `snapshot-response` events are being correctly processed
-
-#### Common Issues and Solutions
-
-- **Port conflicts:** If port 3002 is in use, edit `httpServer.ts` to use a different port, and update the API routes accordingly
-- **Timing issues:** If operations seem to drop, increase logging and check for race conditions
-- **Type errors:** If you encounter "any" type errors, define proper interfaces in `eventBus.ts`
-- **Missing dependencies:** Run `npm install` in both the root and server directories
-
-## Architecture Overview
-
-The application consists of:
-
-1. **MCP Server**: Handles function calls from Claude AI
-2. **HTTP Server**: Provides Server-Sent Events (SSE) endpoints
-3. **Next.js Frontend**: Renders the tldraw canvas and listens for operations
-4. **EventBus**: Facilitates type-safe communication between components
-
-## Key Interactions
-
-### 1. Creating a Shape
-
-When a user asks Claude to create a diagram element, the following sequence occurs:
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Claude
-    participant MCP Server
-    participant EventBus
-    participant HTTP Server
-    participant Frontend
-
-    User->>Claude: "Draw a rectangle labeled 'Database'"
-    Claude->>MCP Server: createShape(type: "rectangle", x: 100, y: 150, ...)
-    MCP Server->>EventBus: emit("tldraw-operation", {type: "createShape", ...})
-    EventBus->>HTTP Server: notify listeners
-    HTTP Server->>Frontend: SSE event
-    Frontend->>Frontend: Update tldraw canvas
+```bash
+git clone https://github.com/micahchoo/tldraw-mcp.git
+cd tldraw-mcp
+npm run setup        # installs deps + writes .mcp.json for this machine
 ```
 
-#### Step-by-Step Process:
+That's it. Open this folder in **Claude Code** (or restart it) and the `tldrawserver`
+MCP server is available. Ask it to draw something:
 
-1. **User Request**: User asks Claude to create a diagram element
-2. **Claude Analysis**: Claude processes the request and calls the appropriate MCP function
-3. **MCP Function Call**: The `createShape` function is executed with parameters
-4. **Event Broadcasting**: The operation is broadcast through the EventBus
-5. **HTTP Transmission**: The HTTP server forwards the event as an SSE message
-6. **Frontend Rendering**: The frontend receives the event and updates the tldraw canvas
+> "Draw a three-step flowchart: Plan → Build → Ship, connected with arrows."
 
-### 2. Getting a Snapshot
+Then open **http://localhost:3002** — you'll see an index of active boards; click yours
+to watch it (or ask the agent for its board URL).
 
-When Claude needs the current state of the diagram:
+Requirements: Node 18+ and internet access (the canvas page loads tldraw from a CDN).
 
-```mermaid
-sequenceDiagram
-    participant Claude
-    participant MCP Server
-    participant EventBus
-    participant HTTP Server
-    participant Frontend
+## How it works
 
-    Claude->>MCP Server: getSnapshot()
-    MCP Server->>EventBus: emit("tldraw-operation", {type: "requestSnapshot", requestId: "abc123"})
-    EventBus->>HTTP Server: notify listeners
-    HTTP Server->>Frontend: SSE event
-    Frontend->>Frontend: Get tldraw snapshot
-    Frontend->>HTTP Server: POST /api/snapshot
-    HTTP Server->>EventBus: emit("snapshot-response", {requestId: "abc123", snapshot: {...}})
-    EventBus->>MCP Server: notify listeners
-    MCP Server->>Claude: Return snapshot data
+Two kinds of process, deliberately decoupled:
+
+```
+        ┌──────── canvas daemon (port 3002) — ONE shared instance ────────┐
+        │  serves the tldraw web page  +  relays operations  +  leases     │
+        └───▲─────────────────▲────────────────────────▲──────────────────┘
+            │ POST operations  │ POST operations        │ SSE
+      ┌─────┴──────┐    ┌──────┴──────┐          ┌───────┴────────┐
+      │ MCP (Claude)│   │  MCP (omp)  │   …       │ your browser   │
+      │  ephemeral  │   │  ephemeral  │          │  (the board)   │
+      └─────────────┘   └─────────────┘          └────────────────┘
 ```
 
-#### Step-by-Step Process:
+- **The MCP server** (`server/src/index.ts`) is thin and ephemeral — your MCP client
+  spawns one per connection. It binds no port. On startup it makes sure the daemon is
+  running (starting it if not) and holds a **lease**; each tool call POSTs an operation
+  to the daemon.
+- **The canvas daemon** (`server/src/daemon.ts`) is the shared singleton. It serves the
+  board page, fans operations out to the browser over SSE, and reference-counts leases:
+  when the last agent's lease is gone it shuts down after a grace period. Leases have a
+  TTL, so a crashed agent can't keep it alive forever.
 
-1. **Snapshot Request**: Claude calls the `getSnapshot` function
-2. **Request ID Generation**: The MCP server generates a unique request ID
-3. **Snapshot Request Broadcasting**: The request is broadcast through EventBus
-4. **Frontend Processing**: The frontend receives the request and captures the current canvas state
-5. **Snapshot Submission**: The frontend sends the snapshot back to the server
-6. **Response Processing**: The EventBus routes the snapshot back to the waiting MCP function
-7. **Return to Claude**: The snapshot data is returned to Claude
+Because every agent POSTs to the one daemon, concurrent edits from different agents and
+different harnesses just work. Open the board late and the daemon replays the plan built
+so far.
 
-## Why We Use EventBus
+## Multiple projects & multiple agents
 
-The EventBus provides several important benefits, even in a single-client scenario:
+One daemon hosts **many boards** ("rooms"), one per project — agents working on different
+things never see each other's shapes.
 
-### 1. Decoupled Architecture
+- **A board = a project, keyed automatically by the client's working directory.** Open
+  Claude Code in `~/work/foo` and it draws on board `foo`; a second window in `~/work/foo`
+  shares it; a window in `~/work/bar` gets its own board. Override with the `TLDRAW_BOARD`
+  env var, or have the agent call `useBoard("name")` to switch mid-session.
+- **See who drew what.** On a shared board, each agent's shapes get a stable colour and
+  their shape references are namespaced, so two agents' flowcharts don't tangle.
+- **Browse boards.** Open http://localhost:3002 for an index of active boards; click one,
+  or go straight to `http://localhost:3002/?board=<name>`. The agent will also tell you
+  its board URL (`getBoardUrl`).
 
-EventBus creates a clean separation between different components:
+Scope is local only — the daemon binds `127.0.0.1`. "Concurrent users" means multiple
+agent sessions on your machine, separated by project.
 
-- MCP server can focus on handling Claude's function calls
-- HTTP server can focus on client communication
-- Components can communicate without direct references to each other
+## Tools the agent can call
 
-### 2. Asynchronous Communication
+**High-level graph tools (preferred — for plans of any size).** You describe a plan by
+*name and structure*; the server auto-lays it out with [dagre](https://github.com/dagrejs/dagre).
+No coordinates, no id bookkeeping — ideal for small models and large plans.
 
-The EventBus enables asynchronous communication patterns:
+| Tool | What it does |
+|------|--------------|
+| `drawGraph` | draw a whole diagram in one call: nodes (by id) + edges (by node id), auto-laid-out |
+| `addNode` / `addEdge` | add/update one node or connect two by id (missing nodes auto-created) |
+| `describeBoard` | compact read-back of nodes (with status), edges, frames, and free-form shapes |
+| `setStatus` | mark a node none/todo/doing/done/blocked — colours it (done=green, doing=orange, blocked=red) |
+| `updateNode` | change a node's label, shape, colour, or group |
+| `removeNode` / `removeEdge` / `clearBoard` | prune or reset |
+| `createFrame` | a titled section/swimlane to group nodes into |
+| `focusOn` | pan/zoom every viewer's browser to a node |
+| `batch` | apply many graph commands with a single layout at the end |
 
-- MCP functions can trigger operations without waiting for UI updates
-- Snapshot requests can be handled asynchronously with promises
+**Low-level tools (manual coordinates — an escape hatch).**
 
-### 3. Centralized Event Management
+| Tool | What it does |
+|------|--------------|
+| `createShape` | rectangle / ellipse / triangle / diamond at (x,y), with optional text |
+| `connectShapes` | arrow between two flowchart steps (by "step-N" id) |
+| `addText` | free text at a position |
+| `createFlowchartStep` | numbered step box, auto-connected to the previous one |
+| `getSnapshot` | capture the raw tldraw board state |
 
-All communication flows through a single channel:
+**Board control.** `useBoard` switches this agent to a named board (project); `getBoardUrl`
+prints the current board's URL.
 
-- Consistent event handling patterns
-- Easier debugging (all events can be logged in one place)
-- Simplified error handling
+## Using it with other MCP clients
 
-### 4. Extensibility
+`npm run setup` prints a ready-to-paste config snippet with the absolute paths for your
+machine. Add it under `"mcpServers"`:
 
-The EventBus pattern makes the system more extensible:
+- **Claude Code, globally** (any project, not just this repo): add the snippet to
+  `~/.claude.json`.
+- **omp**: add it to `~/.omp/agent/mcp.json`, then restart omp (it caches config at
+  startup).
+- **Any stdio MCP client**: `command` is the `tsx` binary, `args` is the path to
+  `server/src/index.ts` — both absolute. Absolute paths matter: most clients ignore the
+  config's `cwd` and spawn from their own directory.
 
-- New event types can be added without changing the communication architecture
-- Additional listeners can be added without modifying existing code
-- Future support for multiple clients would be easier to implement
+## Troubleshooting
 
-## Getting Started
+- **Board shows nothing / "reconnecting"**: no agent is connected yet, so the daemon
+  isn't running. Ask an agent to draw, then reload http://localhost:3002.
+- **`-32000` / "Transport closed" on connect**: the config isn't using absolute paths.
+  Re-run `npm run setup`, or copy the printed snippet exactly.
+- **Manual daemon run (debugging)**: `npm run canvas` (from the repo root) starts the
+  daemon in the foreground. Env knobs: `TLDRAW_PORT`, `TLDRAW_IDLE_GRACE_MS`,
+  `TLDRAW_LEASE_TTL_MS`.
+- **Logs**: `server/src/daemon.log` and `server/src/mcp-server.log`.
 
-1. Install dependencies for both the frontend and server:
+## Note on the `app/` folder
 
-   ```powershell
-   # Install Next.js frontend dependencies
-   npm install
+The original Next.js app in `app/` is superseded — the daemon now serves the canvas
+itself on port 3002, so a fresh clone doesn't need it. It's kept for reference; you can
+ignore it (or delete it) for the MCP workflow.
 
-   # Install MCP server dependencies
-   cd server
-   npm install
-   cd ..
-   ```
+## Contributing
 
-2. The easiest way to start everything is to use the provided script:
+Contributions welcome. For bugs or feature requests, open an issue. For code changes:
 
-   ```powershell
-   # This will start all components in separate windows
-   ./start-all.bat
-   ```
+1. Fork the repo
+2. Create a feature branch
+3. Make your changes — follow the existing code style (TypeScript, ESM, no framework dependencies in `server/`)
+4. Open a PR against `main`
 
-   Or if you prefer to start each component manually:
+The interesting work lives in `server/src/`. `app/` is legacy Next.js scaffolding and
+can be ignored for MCP changes.
 
-   ```powershell
-   # Start the MCP server (for Claude)
-   cd server
-   npm run build
-   npm start  # Or use ./start.bat
+## License
 
-   # In another terminal, start the HTTP server
-   cd server
-   npm run start:http  # Or use ./start-http.bat
-
-   # In a third terminal, start the Next.js frontend
-   npm run dev
-   ```
-
-3. Configure Claude Desktop to connect to your MCP server:
-
-   ```powershell
-   # Run the setup script to automatically configure Claude Desktop
-   ./setup-claude.bat
-   ```
-
-   Or manually update your Claude Desktop configuration file (typically located at `%AppData%\Claude\claude_desktop_config.json`):
-
-   ```json
-   {
-     "mcpServers": {
-       "tldrawserver": {
-         "command": "node",
-         "args": ["PATH_TO_COMPILED_JS_FILE"]
-       }
-     }
-   }
-   ```
-
-   Replace `PATH_TO_COMPILED_JS_FILE` with the absolute path to the compiled JavaScript file, e.g., `D:\\tldraw-mcp\\server\\dist\\index.js`.
-
-4. Open [http://localhost:3000](http://localhost:3000) in your browser to see the tldraw interface
-
-5. Restart Claude Desktop and tell it: "I'd like to use the tldrawserver MCP server to draw a diagram"
-
-## Project Structure
-
-- **server/**: MCP server implementation
-  - **src/**: TypeScript source files
-    - **index.ts**: Main MCP server with function definitions
-    - **httpServer.ts**: HTTP server for SSE communication
-    - **eventBus.ts**: Event bus implementation with TypeScript interfaces
-  - **dist/**: Compiled JavaScript files (generated)
-  - **build.bat**: Script to compile TypeScript
-  - **start.bat**: Script to build and run the MCP server
-  - **start-http.bat**: Script to build and run the HTTP server
-- **app/**: Next.js frontend
-  - **components/TldrawEditor.tsx**: Frontend component with tldraw integration
-  - **api/events/route.ts**: Next.js API route for SSE events
-  - **api/snapshot/route.ts**: Next.js API route for snapshots
-
-## Tldraw Shape Types
-
-Important note about tldraw's shape types:
-
-Tldraw uses a specific shape type system that differs from our simple descriptive names. The mapping is as follows:
-
-- For basic shapes (rectangle, ellipse, triangle, diamond), tldraw uses a "geo" type with a "geo" property specifying the actual shape
-- For text, tldraw uses a "text" type
-- For arrows/connectors, tldraw uses an "arrow" type
-
-For example, when we specify a "rectangle" in our API, TldrawEditor.tsx maps this to:
-
-```tsx
-editor.createShape({
-  type: "geo",
-  props: {
-    geo: "rectangle",
-    // other properties
-  },
-});
-```
-
-This mapping is handled automatically in the TldrawEditor component.
-
-## Available MCP Tools
-
-The following tools are available to Claude via the MCP server:
-
-- `createShape`: Create basic shapes (rectangle, ellipse, triangle, diamond)
-- `connectShapes`: Connect shapes with arrows
-- `addText`: Add standalone text elements
-- `createFlowchartStep`: Create a flowchart step (with optional connection to previous step)
-- `getSnapshot`: Get a snapshot of the current diagram
-
-## Technology Stack
-
-- **Backend**: Node.js, TypeScript, Model Context Protocol SDK
-- **Frontend**: Next.js, React
-- **Diagramming**: tldraw
-- **Communication**: Server-Sent Events (SSE), EventBus
-
-## Type Safety
-
-The project implements TypeScript interfaces for all message types to ensure type safety across the application, including:
-
-- Specific payload types for each event
-- Type guards for runtime type checking
-- Strong typing for all MCP function parameters
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT

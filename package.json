@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "canvas": "server/node_modules/.bin/tsx server/src/daemon.ts",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -20,6 +22,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^10.0.3",
     "eslint": "^9",
     "eslint-config-next": "15.1.8",
     "postcss": "^8",
