@@ -99,7 +99,7 @@ Ladder observations (evidence):
   CLAUDE.md: new drawing goes through the graph model. Done at one canonical path and the rule locked.
   ```
 - **Strength** — Worth exploring (one structural signal; "fewer tools" partly a judgment call).
-- **Status** — queued
+- **Status** — done 2026-07-11 — cut createShape/addText/connectShapes/createFlowchartStep/getSnapshot; 22→17 graph-only tools; graph model is canonical
 
 ---
 
@@ -155,6 +155,7 @@ make connected boxes.** Worth-exploring (not Strong), so no gate pressure; run i
 shrink the tool surface for a small model.
 
 ## Decided
+- canonicalize-tool-surface (Issue 3) — done — 2026-07-11 — 17 graph-only tools
 - readback-write-surface — done — 2026-07-11 — ledgers/READBACK.md
 - silent-false-confirmations — done — 2026-07-11 — ledgers/SILENCE.md
 - D1-capability-reach — done(classified) — 2026-07-11 — ledgers/CAPABILITY.md
