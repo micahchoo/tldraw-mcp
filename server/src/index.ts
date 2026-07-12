@@ -12,7 +12,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawn } from "child_process";
 import { randomUUID, createHash } from "crypto";
-import type { TldrawOperation } from "./eventBus.js";
 
 const DAEMON_PORT = Number(process.env.TLDRAW_PORT) || 3002;
 const DAEMON_URL = `http://localhost:${DAEMON_PORT}`;
@@ -46,26 +45,6 @@ function logToFile(message: string) {
 }
 
 logToFile(`[Server] Starting MCP server (agent ${agentId})...`);
-
-// Forward an operation to the daemon, tagged with the current board and this
-// agent's id (the daemon routes by board; the browser tints/namespaces by agent).
-// Fire-and-forget: a tool call still succeeds even if the canvas isn't up.
-async function postOperation(operation: TldrawOperation): Promise<any> {
-  try {
-    const res = await fetch(`${DAEMON_URL}/api/operation`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        board: currentBoard,
-        operation: { ...operation, agentId },
-      }),
-    });
-    return await res.json();
-  } catch (error) {
-    logToFile(`[Server] Could not reach canvas daemon at ${DAEMON_URL}: ${error}`);
-    return null;
-  }
-}
 
 // Actionable error text for a blind model: the daemon returns {errors:[]} on the
 // happy path but {error} on its catch path — never surface "undefined".
@@ -170,166 +149,25 @@ async function releaseAndExit(reason: string): Promise<void> {
   process.exit(0);
 }
 
-const server = new McpServer({
-  name: "TldrawServer",
-  version: "1.0.0",
-});
-
-server.tool(
-  "createShape",
-  "Draw a rectangle, ellipse, triangle, or diamond at (x, y) on the current board, sized width×height, with optional label text. Each agent's shapes get a distinct colour.",
+const server = new McpServer(
   {
-    type: z.enum(["rectangle", "ellipse", "triangle", "diamond"]),
-    x: z.number().describe("Top-left x in canvas coordinates"),
-    y: z.number().describe("Top-left y in canvas coordinates"),
-    width: z.number(),
-    height: z.number(),
-    text: z.string().optional().describe("Optional label shown inside the shape"),
+    name: "TldrawServer",
+    version: "1.0.0",
   },
-  async ({ type, x, y, width, height, text }) => {
-    logToFile(
-      `Creating shape: type=${type}, x=${x}, y=${y}, width=${width}, height=${height}, text=${text || ""}`
-    );
-    await postOperation({
-      type: "createShape",
-      payload: { shapeType: type, x, y, width, height, text: text || "" },
-    });
-
-    return {
-      content: [
-        { type: "text", text: `Created a ${type} at position (${x}, ${y})` },
-      ],
-    };
+  {
+    // Orients the model once, up front — leading words: plan, board, ready-set.
+    instructions:
+      "A shared tldraw planning board. Build a plan as a graph of named nodes and edges — " +
+      "drawGraph (bulk) or addNode/addEdge; there are no coordinates, the server auto-lays it out. " +
+      "Track progress with setStatus; ask nextActionable for what to work on now; read the plan " +
+      "back with describeBoard. Each project has its own board (getBoardUrl to view it); plans persist " +
+      "across sessions.",
   }
 );
-
-server.tool(
-  "connectShapes",
-  "Draw an arrow between two flowchart steps created with createFlowchartStep. Reference them by step id, e.g. fromId \"step-1\", toId \"step-3\".",
-  {
-    fromId: z.string().describe('Source step id, e.g. "step-1"'),
-    toId: z.string().describe('Target step id, e.g. "step-2"'),
-    arrowType: z.enum(["straight", "curved", "orthogonal"]).optional(),
-  },
-  async ({ fromId, toId, arrowType }) => {
-    const r = await postOperation({
-      type: "connectShapes",
-      payload: { fromId, toId, arrowType: arrowType || "straight" },
-    });
-
-    // Honest feedback: the arrow only renders if both are existing step ids.
-    if (r && r.resolved === false) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Could not connect: unknown step id(s) ${r.unknown.join(", ")}. Create them with createFlowchartStep first, or use addEdge for graph nodes.`,
-          },
-        ],
-      };
-    }
-    return {
-      content: [{ type: "text", text: `Connected ${fromId} → ${toId}.` }],
-    };
-  }
-);
-
-server.tool(
-  "addText",
-  "Add a free-standing text label at (x, y) on the current board.",
-  {
-    x: z.number(),
-    y: z.number(),
-    text: z.string(),
-  },
-  async ({ x, y, text }) => {
-    await postOperation({
-      type: "addText",
-      payload: { x, y, text },
-    });
-
-    return {
-      content: [
-        { type: "text", text: `Added text "${text}" at position (${x}, ${y})` },
-      ],
-    };
-  }
-);
-
-server.tool(
-  "createFlowchartStep",
-  "Create a numbered step box (referenceable as \"step-<n>\"). Auto-lays-out horizontally if x/y are omitted; set connectToPrevious to draw an arrow from the previous step.",
-  {
-    stepNumber: z.number().describe("Sequential step number; also its reference id \"step-<n>\""),
-    title: z.string(),
-    description: z.string().optional().describe("Optional second line inside the box"),
-    x: z.number().optional(),
-    y: z.number().optional(),
-    connectToPrevious: z.boolean().optional().describe("Draw an arrow from step-(n-1) to this step"),
-  },
-  async ({ stepNumber, title, description, x, y, connectToPrevious }) => {
-    const posX = x || stepNumber * 200;
-    const posY = y || 200;
-
-    await postOperation({
-      type: "createFlowchartStep",
-      payload: {
-        stepNumber,
-        title,
-        description: description || "",
-        x: posX,
-        y: posY,
-        connectToPrevious: connectToPrevious !== false,
-      },
-    });
-
-    return {
-      content: [
-        { type: "text", text: `Created flowchart step ${stepNumber}: ${title}` },
-      ],
-    };
-  }
-);
-
-server.tool("getSnapshot", "Capture the current board's full contents as a tldraw snapshot (JSON).", {}, async () => {
-  const requestId = `snapshot-${Date.now()}`;
-  try {
-    const res = await fetch(`${DAEMON_URL}/api/request-snapshot`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ board: currentBoard, requestId }),
-    });
-    const { snapshot } = (await res.json()) as {
-      snapshot: Record<string, unknown> | null;
-    };
-
-    if (snapshot) {
-      return {
-        content: [{ type: "text", text: `Diagram snapshot captured` }],
-        snapshot,
-      };
-    }
-    return {
-      content: [
-        { type: "text", text: `Failed to capture diagram snapshot (timeout)` },
-      ],
-    };
-  } catch (error) {
-    logToFile(`[Server] getSnapshot could not reach daemon: ${error}`);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Failed to capture snapshot: canvas at ${DAEMON_URL} is not reachable`,
-        },
-      ],
-    };
-  }
-});
 
 server.tool(
   "useBoard",
-  "Switch which board (project) you draw on. Each board is a separate canvas; agents on the same board share it. Defaults to your working directory.",
+  "Switch to a named board (a separate canvas per project). Same-name boards are shared. Defaults to your working directory.",
   { name: z.string().describe("Board/project name to draw on") },
   async ({ name }) => {
     const next = sanitizeBoard(name);
@@ -347,16 +185,14 @@ server.tool(
   }
 );
 
-server.tool("getBoardUrl", "Return the browser URL for the board you're currently drawing on.", {}, async () => ({
+server.tool("getBoardUrl", "The browser URL of your current board.", {}, async () => ({
   content: [
     { type: "text", text: `Current board "${currentBoard}" — view at ${boardUrl()}` },
   ],
 }));
 
-// ---- High-level graph tools (preferred for plans of any size) ----
-// These let you describe a plan by NAME and STRUCTURE; the server auto-lays it
-// out. No coordinates, no id bookkeeping. Use these instead of createShape for
-// anything with connections or more than a few boxes.
+// ---- Graph tools: describe a plan by NAME and STRUCTURE; the server auto-lays
+// it out. No coordinates, no id bookkeeping. ----
 
 const NODE_SHAPE = z.enum(["rectangle", "ellipse", "diamond", "triangle"]);
 const NODE_STATUS = z.enum(["none", "todo", "doing", "done", "blocked"]);
@@ -364,7 +200,7 @@ const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
 server.tool(
   "drawGraph",
-  "Draw or extend a whole diagram in ONE call: give nodes (by id) and edges (by node id). The server auto-lays it out — no coordinates needed. This is the best tool for plans, flowcharts, and dependency graphs of any size. Set replace:true to redraw the board from scratch.",
+  "Draw or extend a whole plan in one call from nodes (by id) and edges (by node id) — auto-laid-out, no coordinates. Best for anything with connections or more than a few boxes. replace:true redraws from scratch.",
   {
     nodes: z
       .array(
@@ -399,7 +235,7 @@ server.tool(
 
 server.tool(
   "addNode",
-  "Add or update one node by id. The server places it automatically. Re-calling with the same id updates it (no duplicates).",
+  "Add or update one plan node by id (auto-placed). The same id updates in place, never duplicates.",
   {
     id: z.string(),
     label: z.string().optional(),
@@ -415,7 +251,7 @@ server.tool(
 
 server.tool(
   "addEdge",
-  "Connect two nodes with an arrow, by their ids. Missing nodes are created automatically.",
+  "Connect two nodes with an arrow by id. Missing endpoints are created and reported, so a typo shows up.",
   { from: z.string(), to: z.string(), label: z.string().optional() },
   async (args) => {
     const r = await graph({ command: "addEdge", ...args });
@@ -430,8 +266,24 @@ server.tool(
 );
 
 server.tool(
+  "nextActionable",
+  "The ready-set: nodes whose dependencies are all done and that aren't done or blocked — what to work on next. Prefer this over re-reading the plan. owner ('me' for yourself) filters to yours plus unowned.",
+  { owner: z.string().optional().describe("Filter to this owner's ready nodes (+ unowned). Use 'me' for yourself.") },
+  async ({ owner }) => {
+    const resolved = owner === "me" ? agentId : owner;
+    const r = await graph({ command: "nextActionable", owner: resolved });
+    const ready = (r?.data?.ready ?? []) as Array<{ id: string; label: string }>;
+    return ok(
+      ready.length
+        ? `Ready to work on: ${ready.map((n) => `${n.id} (${n.label})`).join(", ")}`
+        : `Nothing actionable — every node is done, blocked, or waiting on a dependency.`
+    );
+  }
+);
+
+server.tool(
   "describeBoard",
-  "Read back everything on the current board: its name, graph nodes (with status), edges, frames, AND any free-form shapes (from createShape/addText/etc). Use this to see what exists before adding, to confirm what you drew, or to resume a plan — compact, unlike getSnapshot.",
+  "Read back the plan as compact text: board name, nodes (status, shape, owner, position), edges, and frames. Use it to see what exists before adding, confirm a change, or resume a plan across sessions.",
   {},
   async () => {
     const r = await graph({ command: "list" });
@@ -441,7 +293,7 @@ server.tool(
 
 server.tool(
   "updateNode",
-  "Change a node's label, shape, status, colour, or group by id.",
+  "Change a node's label, shape, status, colour, group, or owner by id.",
   {
     id: z.string(),
     label: z.string().optional(),
@@ -457,8 +309,22 @@ server.tool(
 );
 
 server.tool(
+  "assignNode",
+  "Assign a node to an agent (defaults to you). Pass owner for someone else, or unassign:true to clear. nextActionable(owner) then partitions the work across agents.",
+  {
+    id: z.string(),
+    owner: z.string().optional().describe("Owner id to assign to; defaults to you"),
+    unassign: z.boolean().optional().describe("Clear the owner instead"),
+  },
+  async ({ id, owner, unassign }) => {
+    const r = await graph({ command: "assignNode", id, owner: unassign ? undefined : owner ?? agentId });
+    return ok(r.ok ? `${unassign ? "Unassigned" : "Assigned"} "${id}"${unassign ? "" : ` to ${owner ?? "you"}`}.` : `Error: ${errText(r)}`);
+  }
+);
+
+server.tool(
   "setStatus",
-  "Set a node's status (none/todo/doing/done/blocked). Colours the node so the board reads as a live tracker (done=green, doing=orange, blocked=red, todo=grey).",
+  "Set a node's status — none/todo/doing/done/blocked. Colours it so the board reads as a live tracker: done=green, doing=orange, blocked=red, todo=grey.",
   { id: z.string(), status: NODE_STATUS },
   async ({ id, status }) => {
     const r = await graph({ command: "setStatus", id, status });
@@ -468,7 +334,7 @@ server.tool(
 
 server.tool(
   "removeNode",
-  "Delete a node (and its edges) by id.",
+  "Delete a node and its edges, by id.",
   { id: z.string() },
   async ({ id }) => {
     const r = await graph({ command: "removeNode", id });
@@ -478,7 +344,7 @@ server.tool(
 
 server.tool(
   "removeEdge",
-  "Delete the arrow between two node ids.",
+  "Delete the arrow between two nodes.",
   { from: z.string(), to: z.string() },
   async ({ from, to }) => {
     const r = await graph({ command: "removeEdge", from, to });
@@ -488,7 +354,7 @@ server.tool(
 
 server.tool(
   "createFrame",
-  "Create a titled section/swimlane that nodes can be grouped into (via a node's group id).",
+  "Create a titled section (swimlane); nodes join it via their group id.",
   { id: z.string(), name: z.string().optional() },
   async ({ id, name }) => {
     const r = await graph({ command: "createFrame", id, name });
@@ -498,7 +364,7 @@ server.tool(
 
 server.tool(
   "focusOn",
-  "Pan and zoom every viewer's browser to a node, by id.",
+  "Pan and zoom every viewer's browser to a node.",
   { id: z.string() },
   async ({ id }) => {
     await graph({ command: "focus", id });
@@ -508,7 +374,7 @@ server.tool(
 
 server.tool(
   "clearBoard",
-  "Remove all graph nodes and edges from the current board (start over).",
+  "Empty the current board — remove all nodes and edges. The board and its saved file remain; use deleteBoard to remove those.",
   {},
   async () => {
     const r = await graph({ command: "clear" });
@@ -517,8 +383,18 @@ server.tool(
 );
 
 server.tool(
+  "deleteBoard",
+  "Delete the current board and its saved file, so it won't reload on restart. (clearBoard only empties it.)",
+  {},
+  async () => {
+    const r = await graph({ command: "deleteBoard" });
+    return ok(r.ok ? `Deleted board "${currentBoard}".` : `Error: ${errText(r)}`);
+  }
+);
+
+server.tool(
   "batch",
-  "Apply many graph commands in one call, with a single layout at the end — efficient for large plans. Each item is an object like {command:\"addNode\", id:\"x\"} or {command:\"addEdge\", from:\"x\", to:\"y\"}.",
+  "Apply many graph commands in one call with a single layout at the end — efficient for large plans. Each item is like {command:'addNode', id:'x'} or {command:'addEdge', from:'x', to:'y'}.",
   {
     commands: z
       .array(z.object({ command: z.string() }).passthrough())

@@ -18,6 +18,7 @@ export interface GraphNode {
   shape: NodeShape;
   status: NodeStatus;
   group?: string;
+  owner?: string; // which agent owns this node (an agentId), for multi-agent plans
   color?: string; // explicit override; otherwise derived from status
   w: number;
   h: number;
@@ -46,6 +47,22 @@ export interface Graph {
 
 export function newGraph(): Graph {
   return { nodes: new Map(), edges: new Map(), frames: new Map() };
+}
+
+// Serialize/deserialize for persistence (Maps don't JSON round-trip on their own).
+export function serialize(g: Graph) {
+  return {
+    nodes: [...g.nodes.values()],
+    edges: [...g.edges.values()],
+    frames: [...g.frames.values()],
+  };
+}
+export function deserialize(o: any): Graph {
+  const g = newGraph();
+  for (const n of o?.nodes ?? []) g.nodes.set(n.id, n);
+  for (const e of o?.edges ?? []) g.edges.set(e.id, e);
+  for (const f of o?.frames ?? []) g.frames.set(f.id, f);
+  return g;
 }
 
 const STATUS_COLOR: Record<NodeStatus, string> = {
@@ -94,6 +111,7 @@ export function applyCommand(g: Graph, cmd: GraphCommand): CommandResult {
         shape: (cmd.shape as NodeShape) ?? prev?.shape ?? "rectangle",
         status: (cmd.status as NodeStatus) ?? prev?.status ?? "none",
         group: (cmd.group as string) ?? prev?.group,
+        owner: (cmd.owner as string) ?? prev?.owner,
         color: (cmd.color as string) ?? prev?.color,
         w: prev?.w ?? DEFAULT_W,
         h: prev?.h ?? DEFAULT_H,
@@ -145,12 +163,19 @@ export function applyCommand(g: Graph, cmd: GraphCommand): CommandResult {
       if (cmd.color != null) n.color = String(cmd.color);
       if (cmd.shape != null) n.shape = cmd.shape as NodeShape;
       if (cmd.group != null) n.group = String(cmd.group);
+      if (cmd.owner != null) n.owner = String(cmd.owner);
       return R({ structural: true });
     }
     case "setStatus": {
       const n = g.nodes.get(String(cmd.id));
       if (!n) return R({ error: `no such node: ${cmd.id}` });
       n.status = cmd.status as NodeStatus;
+      return R({ structural: true });
+    }
+    case "assignNode": {
+      const n = g.nodes.get(String(cmd.id));
+      if (!n) return R({ error: `no such node: ${cmd.id}` });
+      n.owner = cmd.owner ? String(cmd.owner) : undefined;
       return R({ structural: true });
     }
     case "removeNode": {
@@ -180,9 +205,34 @@ export function applyCommand(g: Graph, cmd: GraphCommand): CommandResult {
       return R({ focus: String(cmd.id) });
     case "list":
       return R({ data: describe(g) });
+    case "nextActionable":
+      return R({ data: { ready: readySet(g, cmd.owner ? String(cmd.owner) : undefined) } });
     default:
       return R({ error: `unknown command: ${cmd.command}` });
   }
+}
+
+// The ready-set: nodes an agent can act on now — not done, not blocked, and every
+// predecessor (incoming edge) is done. Roots (no predecessors) are ready. A node
+// in a cycle simply never becomes ready (a predecessor stays not-done), so this
+// can't hang. `owner` filters to one owner when node ownership exists.
+export function readySet(g: Graph, owner?: string) {
+  const preds = new Map<string, string[]>();
+  for (const e of g.edges.values()) {
+    if (!preds.has(e.to)) preds.set(e.to, []);
+    preds.get(e.to)!.push(e.from);
+  }
+  const ready: Array<{ id: string; label: string; status: NodeStatus }> = [];
+  for (const n of g.nodes.values()) {
+    if (n.status === "done" || n.status === "blocked") continue;
+    // owner filter: show my nodes AND unowned ones (a shared pool anyone can grab)
+    if (owner !== undefined && n.owner !== undefined && n.owner !== owner) continue;
+    const ps = preds.get(n.id) ?? [];
+    if (ps.every((from) => g.nodes.get(from)?.status === "done")) {
+      ready.push({ id: n.id, label: n.label, status: n.status });
+    }
+  }
+  return ready;
 }
 
 // Compact, model-friendly read-back — not the giant tldraw snapshot.
@@ -194,6 +244,7 @@ export function describe(g: Graph) {
       shape: n.shape,
       status: n.status,
       ...(n.group ? { group: n.group } : {}),
+      ...(n.owner ? { owner: n.owner } : {}),
       x: Math.round(n.x),
       y: Math.round(n.y),
     })),

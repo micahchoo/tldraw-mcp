@@ -19,7 +19,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { TldrawOperation } from "./eventBus.js";
 import { renderCanvasPage, renderIndexPage } from "./canvasPage.js";
-import { newGraph, applyCommand, layout, renderOps, type Graph, type GraphCommand } from "./graph.js";
+import { newGraph, applyCommand, layout, renderOps, serialize, deserialize, type Graph, type GraphCommand } from "./graph.js";
 
 const num = (name: string, fallback: number) => {
   const v = Number(process.env[name]);
@@ -66,6 +66,43 @@ interface Room {
   graph: Graph; // named node/edge model (the high-level plan)
   leases: Map<string, number>; // agentId -> expiry timestamp
   dropTimer: NodeJS.Timeout | null;
+  saveTimer: NodeJS.Timeout | null; // debounced persistence
+}
+
+// --- Persistence: a board's plan survives daemon restart & agent compaction. ---
+const PERSIST = process.env.TLDRAW_PERSIST !== "0";
+const BOARDS_DIR = path.join(import.meta.dirname, "..", "boards");
+if (PERSIST) fs.mkdirSync(BOARDS_DIR, { recursive: true });
+const boardFile = (id: string) => path.join(BOARDS_DIR, `${encodeURIComponent(id)}.json`);
+
+function loadRoom(room: Room) {
+  if (!PERSIST) return;
+  try {
+    const raw = fs.readFileSync(boardFile(room.id), "utf8");
+    const d = JSON.parse(raw);
+    room.graph = deserialize(d.graph);
+    room.freeform = d.freeform ?? [];
+    room.stepIds = new Set(d.stepIds ?? []);
+    log(`[persist] loaded board ${room.id} (${room.graph.nodes.size} nodes)`);
+  } catch {
+    /* no saved board yet */
+  }
+}
+function scheduleSave(room: Room) {
+  if (!PERSIST) return;
+  if (room.saveTimer) return; // already scheduled
+  room.saveTimer = setTimeout(() => {
+    room.saveTimer = null;
+    try {
+      fs.writeFileSync(
+        boardFile(room.id),
+        JSON.stringify({ graph: serialize(room.graph), freeform: room.freeform, stepIds: [...room.stepIds] })
+      );
+    } catch (e) {
+      log(`[persist] save failed for ${room.id}: ${e}`);
+    }
+  }, 500);
+  room.saveTimer.unref();
 }
 
 // Turn a free-form operation into a read-back descriptor (null if it isn't a
@@ -99,9 +136,10 @@ let daemonIdleTimer: NodeJS.Timeout | null = null;
 function getRoom(id: string): Room {
   let room = rooms.get(id);
   if (!room) {
-    room = { id, bus: new EventEmitter(), backlog: [], freeform: [], stepIds: new Set(), graph: newGraph(), leases: new Map(), dropTimer: null };
+    room = { id, bus: new EventEmitter(), backlog: [], freeform: [], stepIds: new Set(), graph: newGraph(), leases: new Map(), dropTimer: null, saveTimer: null };
     room.bus.setMaxListeners(0);
     rooms.set(id, room);
+    loadRoom(room); // rehydrate a persisted plan, if any
     log(`[room ${id}] created`);
   }
   if (room.dropTimer) {
@@ -325,6 +363,7 @@ const server = createServer(async (req, res) => {
         const unknown = [p.fromId, p.toId].filter((id) => !room.stepIds.has(String(id)));
         extra = { resolved: unknown.length === 0, unknown };
       }
+      if (desc) scheduleSave(room);
       room.bus.emit("tldraw-operation", operation);
       res.writeHead(200, JSON_HEAD);
       res.end(JSON.stringify({ success: true, ...extra }));
@@ -343,7 +382,26 @@ const server = createServer(async (req, res) => {
   if (pathname === "/api/graph" && req.method === "POST") {
     try {
       const body = await readJson(req);
-      const room = getRoom(normalizeBoard(body.board));
+      const boardId = normalizeBoard(body.board);
+
+      // deleteBoard is a daemon-level op (drops the room + its file), not a graph
+      // mutation — clearBoard only empties the in-memory graph, which the persisted
+      // file would resurrect on next load.
+      if (body.command === "deleteBoard") {
+        const room = rooms.get(boardId);
+        if (room) {
+          if (room.saveTimer) clearTimeout(room.saveTimer);
+          room.bus.emit("tldraw-operation", { type: "clearGraph", payload: {} });
+          rooms.delete(boardId);
+        }
+        try { if (PERSIST) fs.rmSync(boardFile(boardId), { force: true }); } catch {}
+        log(`[persist] deleted board ${boardId}`);
+        res.writeHead(200, JSON_HEAD);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      const room = getRoom(boardId);
       const cmds: GraphCommand[] = Array.isArray(body.commands)
         ? body.commands
         : [{ command: body.command, ...body }];
@@ -373,6 +431,7 @@ const server = createServer(async (req, res) => {
         for (const op of renderOps(room.graph)) room.bus.emit("tldraw-operation", op);
       }
       if (focus) room.bus.emit("tldraw-operation", { type: "focus", payload: { id: focus } });
+      if (structural || cleared || removed.length) scheduleSave(room);
 
       // `list` returns the graph (has a `nodes` field); augment it with the board
       // name and free-form shapes so read-back covers the whole write surface.
