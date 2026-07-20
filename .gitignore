@@ -45,3 +45,7 @@ next-env.d.ts
 
 # persisted planning boards (machine-local)
 server/boards/
+
+# runtime caches dropped by the detached daemon (spawned with repo-root cwd)
+node-compile-cache/
+tsx-1000/

@@ -159,9 +159,10 @@ const server = new McpServer(
     instructions:
       "A shared tldraw planning board. Build a plan as a graph of named nodes and edges — " +
       "drawGraph (bulk) or addNode/addEdge; there are no coordinates, the server auto-lays it out. " +
-      "Track progress with setStatus; ask nextActionable for what to work on now; read the plan " +
-      "back with describeBoard. Each project has its own board (getBoardUrl to view it); plans persist " +
-      "across sessions.",
+      "For UI mockups use drawWireframe: screens with typed elements (navbar, input, button…), " +
+      "stacked top-to-bottom automatically. Track progress with setStatus; ask nextActionable for " +
+      "what to work on now; read the plan back with describeBoard. Each project has its own board " +
+      "(getBoardUrl to view it); plans persist across sessions.",
   }
 );
 
@@ -222,12 +223,65 @@ server.tool(
       .optional()
       .describe("Optional sections/swimlanes to group nodes"),
     replace: z.boolean().optional().describe("Clear the board first"),
+    direction: z
+      .enum(["TB", "LR"])
+      .optional()
+      .describe("Flow direction: TB top-to-bottom (default) or LR left-to-right"),
   },
-  async ({ nodes, edges, frames, replace }) => {
-    const r = await graph({ command: "drawGraph", nodes, edges, frames, replace });
+  async ({ nodes, edges, frames, replace, direction }) => {
+    const r = await graph({ command: "drawGraph", nodes, edges, frames, replace, direction });
     return ok(
       r.ok
         ? `Drew ${nodes.length} node(s), ${edges?.length ?? 0} edge(s). View: ${boardUrl()}`
+        : `Errors: ${errText(r)}`
+    );
+  }
+);
+
+// Wireframe elements: no coordinates — each screen is a vertical stack, and an
+// entry that is an ARRAY of elements becomes one side-by-side row.
+const WIRE_ELEMENT = z.object({
+  type: z
+    .enum([
+      "navbar", "heading", "text", "button", "input", "search", "image",
+      "list", "avatar", "divider", "tabbar", "checkbox", "spacer",
+    ])
+    .describe("What kind of UI element this is"),
+  id: z.string().optional().describe("Stable id so flows can point at it, e.g. \"login-btn\""),
+  label: z.string().optional().describe("Text: title, placeholder, button caption, heading…"),
+  lines: z.number().optional().describe("text: placeholder bar count; list: row count"),
+  items: z.array(z.string()).optional().describe("list row labels or tabbar tab names"),
+  h: z.number().optional().describe("Height override (image, spacer, avatar)"),
+});
+
+server.tool(
+  "drawWireframe",
+  "Draw UI wireframes: screens (phone/tablet/desktop) whose elements stack top-to-bottom automatically — no coordinates. An elements entry that is an ARRAY renders side by side in one row. Same screen id updates in place; flows draw arrows between screens or elements (e.g. a button to the screen it opens).",
+  {
+    screens: z
+      .array(
+        z.object({
+          id: z.string().describe("Stable screen id, e.g. \"login\""),
+          name: z.string().optional().describe("Screen title (defaults to id)"),
+          device: z.enum(["phone", "tablet", "desktop"]).optional().describe("Frame size (default phone)"),
+          elements: z
+            .array(z.union([WIRE_ELEMENT, z.array(WIRE_ELEMENT)]))
+            .describe("Top-to-bottom content; an array entry is one side-by-side row"),
+        })
+      )
+      .describe("The screens to draw or update"),
+    flows: z
+      .array(z.object({ from: z.string(), to: z.string(), label: z.string().optional() }))
+      .optional()
+      .describe("Arrows between screen/element ids, e.g. {from:'login-btn', to:'home'}"),
+    replace: z.boolean().optional().describe("Remove all existing screens first"),
+  },
+  async ({ screens, flows, replace }) => {
+    const r = await graph({ command: "drawWireframe", screens, flows, replace });
+    const n = screens.reduce((sum, s) => sum + s.elements.flat().length, 0);
+    return ok(
+      r.ok
+        ? `Drew ${screens.length} screen(s) with ${n} element(s), ${flows?.length ?? 0} flow(s). View: ${boardUrl()}`
         : `Errors: ${errText(r)}`
     );
   }
@@ -283,7 +337,7 @@ server.tool(
 
 server.tool(
   "describeBoard",
-  "Read back the plan as compact text: board name, nodes (status, shape, owner, position), edges, and frames. Use it to see what exists before adding, confirm a change, or resume a plan across sessions.",
+  "Read back the plan as compact text: board name, nodes (status, shape, owner, position), edges, frames, and wireframe screens with their elements. Use it to see what exists before adding, confirm a change, or resume a plan across sessions.",
   {},
   async () => {
     const r = await graph({ command: "list" });
@@ -334,7 +388,7 @@ server.tool(
 
 server.tool(
   "removeNode",
-  "Delete a node and its edges, by id.",
+  "Delete a node and its edges by id — or a whole wireframe screen (pass the screen id) with its elements and flows.",
   { id: z.string() },
   async ({ id }) => {
     const r = await graph({ command: "removeNode", id });

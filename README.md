@@ -8,7 +8,8 @@ the board runs only when an agent is actually using it.
 ## Features
 
 - **Zero-config.** `npm run setup` and it works. No server to start — the canvas daemon auto-launches on first use and idles down when done.
-- **Graph tools with auto-layout.** Describe diagrams by *name and structure* (no coordinates). The server lays them out with dagre — works for plans of any size.
+- **Graph tools with auto-layout.** Describe diagrams by *name and structure* (no coordinates). The server lays them out with dagre — works for plans of any size. Nodes are sized to their labels and edges route as elbow arrows, so charts don't clip or collide.
+- **Wireframes.** `drawWireframe` draws UI mockups: screens (phone/tablet/desktop) whose elements — navbar, inputs, buttons, lists, tabbar — stack top-to-bottom automatically, with flow arrows between screens.
 - **Multi-board.** One daemon hosts many isolated boards, keyed by project directory. Agents in different projects never see each other's shapes.
 - **Status tracking.** Mark nodes `todo`/`doing`/`done`/`blocked` — the board reads as a live tracker.
 - **Agent namespacing.** Each agent's shapes get a stable colour and namespaced ids — see who drew what on shared boards.
@@ -26,6 +27,11 @@ That's it. Open this folder in **Claude Code** (or restart it) and the `tldrawse
 MCP server is available. Ask it to draw something:
 
 > "Draw a three-step flowchart: Plan → Build → Ship, connected with arrows."
+
+or a wireframe:
+
+> "Wireframe a login screen — logo, email and password inputs, a sign-in button —
+> and the home screen it leads to."
 
 Then open **http://localhost:3002** — you'll see an index of active boards; click yours
 to watch it (or ask the agent for its board URL).
@@ -86,7 +92,8 @@ No coordinates, no id bookkeeping — ideal for small models and large plans.
 
 | Tool | What it does |
 |------|--------------|
-| `drawGraph` | draw a whole diagram in one call: nodes (by id) + edges (by node id), auto-laid-out |
+| `drawGraph` | draw a whole diagram in one call: nodes (by id) + edges (by node id), auto-laid-out; `direction` TB or LR |
+| `drawWireframe` | draw UI mockups: screens with typed elements (navbar, heading, text, button, input, search, image, list, avatar, divider, tabbar, checkbox, spacer) stacked automatically; `flows` draw arrows between screens or elements |
 | `addNode` / `addEdge` | add/update one node or connect two by id (missing nodes auto-created) |
 | `describeBoard` | compact read-back: board name, nodes (status, shape, owner, position), edges, frames, free-form shapes |
 | `nextActionable` | the ready-set — nodes whose dependencies are all done; drives execution from the plan. `owner` filters to yours + unowned |

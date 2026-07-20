@@ -109,13 +109,26 @@ function colorFor(agentId) {
   return PALETTE[h % PALETTE.length];
 }
 
-// Graph model shapes: the daemon addresses these by a stable node/edge/frame id;
-// we map each to its tldraw shape id and UPSERT (move/relabel existing) so a
-// relayout just repositions shapes rather than duplicating them.
-const nodeShapes = {};  // nodeId -> tldraw shape id
+// Graph model shapes: the daemon addresses everything by a stable logical id
+// (node, frame, wireframe screen or part); we map each id to its tldraw shape
+// id in ONE registry and UPSERT (move/relabel existing) so a relayout just
+// repositions shapes rather than duplicating them. Arrows bind to any target.
+const targets = {};     // logical id -> tldraw shape id
 const edgeShapes = {};  // edgeId -> { sid, from, to }
-const frameShapes = {}; // frameId -> tldraw shape id
 const GEOS = ["rectangle","ellipse","diamond","triangle"];
+
+// Upsert helper: reuse the existing tldraw shape for a logical id, else create.
+function upsert(editor, id, type, x, y, props, onCreate) {
+  let sid = targets[id];
+  if (sid && editor.getShape(sid)) {
+    editor.updateShape({ id: sid, type, x, y, props });
+  } else {
+    sid = createShapeId(); targets[id] = sid;
+    editor.createShape({ id: sid, type, x, y, props });
+    if (onCreate) onCreate(sid);
+  }
+  return sid;
+}
 
 // tldraw v3: createShape returns the editor (not an id), so we pre-generate ids;
 // shape labels use richText (not a plain 'text' prop); arrows connect via
@@ -181,23 +194,48 @@ function applyOperation(editor, op) {
     case "node": {
       const { id, label, shape, color, x, y, w, h } = op.payload;
       const geo = GEOS.includes(shape) ? shape : "rectangle";
-      const props = { w, h, geo, color, richText: toRichText(label || id) };
-      let sid = nodeShapes[id];
-      if (sid && editor.getShape(sid)) {
-        editor.updateShape({ id: sid, type: "geo", x, y, props });
-      } else {
-        sid = createShapeId(); nodeShapes[id] = sid;
-        editor.createShape({ id: sid, type: "geo", x, y, props });
-      }
+      // fill "solid" so status colours read at a glance and crossing arrows
+      // don't show through the box
+      upsert(editor, id, "geo", x, y, { w, h, geo, color, fill: "solid", richText: toRichText(label || id) });
+      break;
+    }
+    case "shape": {
+      // generic geo part (wireframes): the daemon decides geometry and style
+      const { id, x, y, w, h, geo, color, fill, size, font, align, label, labelColor } = op.payload;
+      const props = { w, h, geo: geo || "rectangle" };
+      if (color) props.color = color;
+      if (fill) props.fill = fill;
+      if (size) props.size = size;
+      if (font) props.font = font;
+      if (align) props.align = align;
+      if (labelColor) props.labelColor = labelColor;
+      if (label) props.richText = toRichText(label);
+      upsert(editor, id, "geo", x, y, props);
+      break;
+    }
+    case "text": {
+      const { id, x, y, w, size, font, color, align, label } = op.payload;
+      const props = { richText: toRichText(label || ""), autoSize: false, w };
+      if (size) props.size = size;
+      if (font) props.font = font;
+      if (color) props.color = color;
+      if (align) props.textAlign = align;
+      upsert(editor, id, "text", x, y, props);
       break;
     }
     case "edge": {
-      const { id, from, to, label } = op.payload;
-      const a = nodeShapes[from], b = nodeShapes[to];
+      const { id, from, to, label, kind } = op.payload;
+      const a = targets[from], b = targets[to];
       if (!a || !b) break;
-      if (edgeShapes[id] && editor.getShape(edgeShapes[id].sid)) break; // bound arrow follows the nodes
+      const props = { color: "grey", kind: kind === "arc" ? "arc" : "elbow", ...(label ? { text: label } : {}) };
+      const existing = edgeShapes[id];
+      if (existing && editor.getShape(existing.sid)) {
+        // bound arrow already follows the shapes; refresh label/kind only
+        editor.updateShape({ id: existing.sid, type: "arrow", props });
+        break;
+      }
       const sid = createShapeId(); edgeShapes[id] = { sid, from, to };
-      editor.createShape({ id: sid, type: "arrow", props: { color: "grey", ...(label ? { text: label } : {}) } });
+      editor.createShape({ id: sid, type: "arrow", props });
       editor.createBindings([
         { fromId: sid, toId: a, type: "arrow", props: { terminal: "start" } },
         { fromId: sid, toId: b, type: "arrow", props: { terminal: "end" } },
@@ -207,21 +245,14 @@ function applyOperation(editor, op) {
     case "frame": {
       const { id, name, x, y, w, h } = op.payload;
       if (!(w > 0 && h > 0)) break;
-      let sid = frameShapes[id];
-      if (sid && editor.getShape(sid)) {
-        editor.updateShape({ id: sid, type: "frame", x, y, props: { w, h, name } });
-      } else {
-        sid = createShapeId(); frameShapes[id] = sid;
-        editor.createShape({ id: sid, type: "frame", x, y, props: { w, h, name } });
-        editor.sendToBack([sid]); // frames sit behind their nodes
-      }
+      upsert(editor, id, "frame", x, y, { w, h, name }, (sid) => editor.sendToBack([sid]));
       break;
     }
     case "deleteNodes": {
       const ids = op.payload.ids || [];
       const kill = [];
       for (const nid of ids) {
-        if (nodeShapes[nid]) { kill.push(nodeShapes[nid]); delete nodeShapes[nid]; }
+        if (targets[nid]) { kill.push(targets[nid]); delete targets[nid]; }
       }
       for (const eid of Object.keys(edgeShapes)) {
         const e = edgeShapes[eid];
@@ -232,13 +263,13 @@ function applyOperation(editor, op) {
     }
     case "clearGraph": {
       const kill = [];
-      for (const m of [nodeShapes, frameShapes]) for (const k of Object.keys(m)) { kill.push(m[k]); delete m[k]; }
+      for (const k of Object.keys(targets)) { kill.push(targets[k]); delete targets[k]; }
       for (const k of Object.keys(edgeShapes)) { kill.push(edgeShapes[k].sid); delete edgeShapes[k]; }
       if (kill.length) editor.deleteShapes(kill);
       break;
     }
     case "focus": {
-      const sid = nodeShapes[op.payload.id];
+      const sid = targets[op.payload.id];
       if (sid && editor.getShape(sid)) { editor.select(sid); editor.zoomToSelection(); }
       break;
     }

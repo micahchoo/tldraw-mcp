@@ -8,6 +8,7 @@
     "start": "tsx src/index.ts",
     "canvas": "tsx src/daemon.ts",
     "build": "tsc",
+    "test": "tsx --test test/*.test.ts",
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
