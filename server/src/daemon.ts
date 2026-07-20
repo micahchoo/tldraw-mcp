@@ -20,6 +20,7 @@ import * as path from "path";
 import type { TldrawOperation } from "./eventBus.js";
 import { renderCanvasPage, renderIndexPage } from "./canvasPage.js";
 import { newGraph, applyCommand, layout, renderOps, serialize, deserialize, type Graph, type GraphCommand } from "./graph.js";
+import { buildStamp } from "./buildStamp.js";
 
 const num = (name: string, fallback: number) => {
   const v = Number(process.env[name]);
@@ -44,6 +45,9 @@ function log(message: string) {
 }
 
 const startedAt = Date.now();
+// Stamp of the source this process actually loaded (tsx reads the tree once,
+// at spawn). /health reports it; a client whose disk stamp differs retires us.
+const BUILD = buildStamp();
 
 // One board = one room. Created lazily; dropped when empty for a while.
 // Compact descriptor of a free-form (low-level) shape, so read-back covers what
@@ -88,21 +92,36 @@ function loadRoom(room: Room) {
     /* no saved board yet */
   }
 }
+function saveRoomNow(room: Room) {
+  try {
+    fs.writeFileSync(
+      boardFile(room.id),
+      JSON.stringify({ graph: serialize(room.graph), freeform: room.freeform, stepIds: [...room.stepIds] })
+    );
+  } catch (e) {
+    log(`[persist] save failed for ${room.id}: ${e}`);
+  }
+}
 function scheduleSave(room: Room) {
   if (!PERSIST) return;
   if (room.saveTimer) return; // already scheduled
   room.saveTimer = setTimeout(() => {
     room.saveTimer = null;
-    try {
-      fs.writeFileSync(
-        boardFile(room.id),
-        JSON.stringify({ graph: serialize(room.graph), freeform: room.freeform, stepIds: [...room.stepIds] })
-      );
-    } catch (e) {
-      log(`[persist] save failed for ${room.id}: ${e}`);
-    }
+    saveRoomNow(room);
   }, 500);
   room.saveTimer.unref();
+}
+// On any shutdown path, write out boards whose debounced save hasn't fired yet
+// — otherwise the last ~500ms of edits die with the process.
+function flushPendingSaves() {
+  if (!PERSIST) return;
+  for (const room of rooms.values()) {
+    if (!room.saveTimer) continue;
+    clearTimeout(room.saveTimer);
+    room.saveTimer = null;
+    saveRoomNow(room);
+    log(`[persist] flushed pending save for ${room.id} on shutdown`);
+  }
 }
 
 // Turn a free-form operation into a read-back descriptor (null if it isn't a
@@ -266,8 +285,19 @@ const server = createServer(async (req, res) => {
         leases: totalLeases(),
         boards: [...rooms.values()].map((r) => ({ id: r.id, leases: r.leases.size, backlog: r.backlog.length })),
         uptimeMs: Date.now() - startedAt,
+        build: BUILD,
       })
     );
+    return;
+  }
+
+  // --- Retire a stale daemon: a client whose src/*.ts stamp differs from ours
+  // asks us to exit so it can respawn the current code (see buildStamp.ts).
+  if (pathname === "/shutdown" && req.method === "POST") {
+    const { stamp } = await readJson(req).catch(() => ({} as any));
+    res.writeHead(200, JSON_HEAD);
+    res.end(JSON.stringify({ ok: true, build: BUILD }));
+    shutdown(`superseded (our build ${BUILD}, disk ${stamp ?? "?"})`);
     return;
   }
 
@@ -510,6 +540,7 @@ function shutdown(reason: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`[daemon] shutting down (${reason})`);
+  flushPendingSaves();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1000).unref();
 }

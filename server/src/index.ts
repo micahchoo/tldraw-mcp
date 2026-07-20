@@ -1,6 +1,7 @@
 // Thin MCP server. It exposes the tldraw tools over stdio and forwards each
 // operation to the canvas daemon (server/src/daemon.ts) over HTTP. It binds NO
-// port of its own. On startup it AUTO-STARTS the daemon if none is running and
+// port of its own. On startup it AUTO-STARTS the daemon if none is running —
+// retiring first any daemon built from older src/*.ts (see buildStamp.ts) — and
 // holds a lease for as long as it's connected; the daemon shuts itself down once
 // the last agent's lease is gone. So the canvas is up exactly when an agent needs
 // it, shared across all agents, and off otherwise — no manual server management.
@@ -12,6 +13,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawn } from "child_process";
 import { randomUUID, createHash } from "crypto";
+import { buildStamp } from "./buildStamp.js";
 
 const DAEMON_PORT = Number(process.env.TLDRAW_PORT) || 3002;
 const DAEMON_URL = `http://localhost:${DAEMON_PORT}`;
@@ -70,27 +72,60 @@ async function graph(payload: Record<string, unknown>): Promise<any> {
   }
 }
 
-async function daemonHealthy(): Promise<boolean> {
+async function daemonHealth(): Promise<{ build?: string } | null> {
   try {
     const res = await fetch(`${DAEMON_URL}/health`, {
       signal: AbortSignal.timeout(1000),
     });
-    return res.ok;
+    if (!res.ok) return null;
+    return (await res.json()) as { build?: string };
   } catch {
-    return false;
+    return null;
   }
 }
 
-// Ensure the shared canvas daemon is running, starting it detached if not.
-// Detached (own session, unref'd, stdio ignored) so it OUTLIVES this ephemeral
-// MCP process and is shared by every agent. If two agents race to start it, only
-// one wins port 3002 — the loser exits cleanly — and both then attach.
+// Ensure the shared canvas daemon is running CURRENT code, starting it detached
+// if not. Detached (own session, unref'd, stdio ignored) so it OUTLIVES this
+// ephemeral MCP process and is shared by every agent. If two agents race to
+// start it, only one wins port 3002 — the loser exits cleanly — and both then
+// attach. A healthy daemon whose /health build stamp differs from src/*.ts on
+// disk is running stale code (tsx never hot-reloads): retire it via /shutdown
+// and respawn, so new tools/layout fixes take effect without manual kills.
 async function ensureDaemon(): Promise<boolean> {
-  if (await daemonHealthy()) {
-    logToFile("[Server] Canvas daemon already running");
-    return true;
+  const stamp = buildStamp();
+  const health = await daemonHealth();
+  if (health) {
+    if (health.build === stamp) {
+      logToFile("[Server] Canvas daemon already running (build matches)");
+      return true;
+    }
+    logToFile(
+      `[Server] Daemon build ${health.build ?? "unknown"} != disk ${stamp}; retiring stale daemon`
+    );
+    try {
+      await fetch(`${DAEMON_URL}/shutdown`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stamp }),
+        signal: AbortSignal.timeout(1000),
+      });
+    } catch {
+      /* daemon may drop the connection mid-exit — that's success */
+    }
+    let down = false;
+    for (let i = 0; i < 25 && !down; i++) {
+      down = (await daemonHealth()) === null;
+      if (!down) await new Promise((r) => setTimeout(r, 200));
+    }
+    if (!down) {
+      // Pre-stamp daemons 404 /shutdown and keep running. A stale canvas beats
+      // no canvas — attach anyway and leave the upgrade for a manual restart.
+      logToFile("[Server] Stale daemon did not exit; continuing with it");
+      return true;
+    }
+  } else {
+    logToFile("[Server] No canvas daemon; starting it detached");
   }
-  logToFile("[Server] No canvas daemon; starting it detached");
   try {
     const tsxBin = path.join(
       import.meta.dirname,
@@ -112,8 +147,9 @@ async function ensureDaemon(): Promise<boolean> {
   }
   // Poll until it answers (or give up after ~8s).
   for (let i = 0; i < 40; i++) {
-    if (await daemonHealthy()) {
-      logToFile("[Server] Canvas daemon is up");
+    const h = await daemonHealth();
+    if (h) {
+      logToFile(`[Server] Canvas daemon is up (build ${h.build ?? "unknown"})`);
       return true;
     }
     await new Promise((r) => setTimeout(r, 200));
